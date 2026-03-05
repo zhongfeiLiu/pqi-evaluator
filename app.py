@@ -1,7 +1,6 @@
 """
-PQI 3.0 导师评估后端服务
-- 接收来自 Notion Webhook 的请求
-- 调用 DeepSeek API 搜索并评估导师
+PQI 3.0 导师评估后端服务 v3.0
+- 使用 Gemini 2.5 Flash + Google Search 实时搜索公开资料
 - 通过 Notion API 将结果写回数据库
 """
 
@@ -9,9 +8,9 @@ import os
 import json
 import logging
 import threading
+import datetime
 from flask import Flask, request, jsonify, render_template
 from notion_client import Client
-from openai import OpenAI
 
 # ── 日志配置 ──────────────────────────────────────────────
 logging.basicConfig(
@@ -23,23 +22,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ── 环境变量 ──────────────────────────────────────────────
-NOTION_TOKEN      = os.environ.get("NOTION_TOKEN", "")
-NOTION_DB_ID      = os.environ.get("NOTION_DB_ID", "")
-DEEPSEEK_API_KEY  = os.environ.get("DEEPSEEK_API_KEY", "")
-WEBHOOK_SECRET    = os.environ.get("WEBHOOK_SECRET", "")   # 可选安全校验
+NOTION_TOKEN     = os.environ.get("NOTION_TOKEN", "")
+NOTION_DB_ID     = os.environ.get("NOTION_DB_ID", "")
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
+WEBHOOK_SECRET   = os.environ.get("WEBHOOK_SECRET", "")
 
-# ── 客户端延迟初始化（避免启动时因环境变量缺失而崩溃）─────
-_deepseek_client = None
+# ── 客户端延迟初始化 ──────────────────────────────────────
 _notion_client = None
-
-def get_deepseek_client():
-    global _deepseek_client
-    if _deepseek_client is None:
-        _deepseek_client = OpenAI(
-            api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
-            base_url="https://api.deepseek.com"
-        )
-    return _deepseek_client
 
 def get_notion_client():
     global _notion_client
@@ -48,57 +37,60 @@ def get_notion_client():
     return _notion_client
 
 # ═══════════════════════════════════════════════════════════
-#  PQI 3.0 评估 Prompt
+#  PQI 3.0 评估核心（Gemini 2.5 Flash + Google Search）
 # ═══════════════════════════════════════════════════════════
 
-PQI_SYSTEM_PROMPT = """你是一位专业的学术导师评估专家，擅长通过公开资料评估研究生导师的质量。
-你将使用 PQI 3.0（PI Quality Index）模型对导师进行量化评估。
+PQI_PROMPT_TEMPLATE = """你是一位专业的学术导师评估专家，使用 PQI 3.0（PI Quality Index）模型对研究生导师进行量化评估。
 
-## PQI 3.0 核心公式
-PQI = 0.35×S + 0.20×P + 0.20×C + 0.15×L + 0.10×F
-PQI_final = PQI - 0.5×D
+## 你的任务
+请对以下导师进行全面的 PQI 3.0 评估：
+- **导师姓名**：{mentor_name}
+- **所在学校/机构**：{institution}
 
-## 各维度说明与评分规则
+## 第一步：信息收集（使用 Google Search 搜索以下内容）
+1. 该导师的 Google Scholar 主页 → 获取 h-index、总引用数、近5年论文数
+2. 学校/院系官网个人主页 → 获取建组时间、研究方向
+3. 实验室官网 → 获取学生列表、毕业生去向（Alumni）
+4. 国家自然科学基金委官网 → 获取在研项目和经费信息
+5. 学术数据库（Web of Science、PubMed 等）→ 验证论文质量
+
+## 第二步：按 PQI 3.0 公式评分
 
 ### S：学生论文质量（权重 35%）
 S = 0.7 × Mean(Top5学生论文评分) + 0.3 × Median(Top10学生论文评分)
-期刊评分：Top 1% → 1.0 | Top 5% → 0.8 | Top 20% → 0.5 | 其余 → 0.2
-若数据不足，根据已有信息合理估算并注明。
+期刊评分：Nature/Science/Cell系列 Top 1% → 1.0 | CNS子刊/顶级专业期刊 Top 5% → 0.8 | 主流SCI Top 20% → 0.5 | 其余 → 0.2
+若学生数据不足，用导师自身论文质量估算，并注明。
 
 ### P：导师科研能力（权重 20%）
 P = 0.7 × P_paper + 0.3 × P_citation
-P_paper = min(近5年高水平通讯作者论文数 / 10, 1)
-P_citation = h-index 归一化（h-index/50，最大为1）
+P_paper = min(近5年高水平通讯/第一作者论文数 / 10, 1)
+P_citation = min(h-index / 50, 1)
 
 ### C：学生去向指数（权重 20%）
 C = 去向评分总和 / 入组学生人数
-去向评分：顶级高校教职→1.0 | 海外Top20博后→0.8 | 国内985教职→0.7 | 国家级科研机构→0.6 | 一线大厂研究岗→0.5 | 普通企业→0.2
+去向评分：顶级高校教职→1.0 | 海外Top20博后→0.8 | 国内985教职→0.7 | 国家级科研机构→0.6 | 一线大厂研究岗→0.5 | 普通企业→0.2 | 未知→0.3（估算）
 
 ### L：实验室稳定度（权重 15%）
 L = min(建组年数 / 10, 1)
+建组年数 = 当前年份 - 导师独立建组年份
 
 ### F：经费指数（权重 10%）
-F = min(5年经费 / 500万人民币, 1)
-参考：国家重大项目→1.0 | 国家重点基金→0.8 | 青年基金→0.5 | 无稳定经费→0.2
+F = min(5年总经费 / 500万人民币, 1)
+参考：国家重大项目(>500万)→1.0 | 重点基金(>200万)→0.8 | 面上项目→0.6 | 青年基金→0.4 | 无稳定经费→0.2
 
 ### D：淘汰率惩罚
-D = (退学 + 转组 + >7年延毕人数) / 入组人数
-PQI_final = PQI - 0.5×D
+D = (退学 + 转组 + 超7年延毕人数) / 入组总人数
+PQI = 0.35×S + 0.20×P + 0.20×C + 0.15×L + 0.10×F
+PQI_final = PQI - 0.5×D（最小值为0）
 
 ## 评级标准
-0.85+ → 顶级实验室 | 0.70-0.85 → 优秀实验室 | 0.55-0.70 → 稳定实验室 | 0.40-0.55 → 风险实验室 | <0.40 → 高危实验室
+≥0.85 → 顶级实验室 | 0.70-0.85 → 优秀实验室 | 0.55-0.70 → 稳定实验室 | 0.40-0.55 → 风险实验室 | <0.40 → 高危实验室
 
-## 你的任务
-1. 基于导师姓名和所在学校，搜索并整合所有公开可获取的信息（Google Scholar、学校官网、Web of Science、实验室主页、Alumni 页面等）
-2. 对每个维度进行评分，注明数据来源和置信度（高/中/低）
-3. 计算最终 PQI_final 分数
-4. 给出综合评级和具体建议
-
-## 输出格式（必须严格遵守 JSON 格式）
-{
-  "mentor_name": "导师姓名",
-  "institution": "所在学校",
-  "scores": {
+## 第三步：输出结果（严格按以下 JSON 格式，不要输出其他内容）
+{{
+  "mentor_name": "{mentor_name}",
+  "institution": "{institution}",
+  "scores": {{
     "S": 0.0,
     "P": 0.0,
     "C": 0.0,
@@ -107,69 +99,103 @@ PQI_final = PQI - 0.5×D
     "D": 0.0,
     "PQI": 0.0,
     "PQI_final": 0.0
-  },
-  "rating": "评级（如：优秀实验室）",
-  "data_sources": {
-    "S": "数据来源说明",
-    "P": "数据来源说明",
-    "C": "数据来源说明",
-    "L": "数据来源说明",
-    "F": "数据来源说明",
-    "D": "数据来源说明"
-  },
-  "confidence": {
+  }},
+  "rating": "评级",
+  "data_sources": {{
+    "S": "具体数据来源，如：Google Scholar显示学生在Nature发表X篇",
+    "P": "具体数据来源，如：h-index=XX，近5年通讯作者论文X篇",
+    "C": "具体数据来源，如：实验室官网Alumni页面，X名毕业生中Y名去往...",
+    "L": "具体数据来源，如：官网显示建组于XXXX年",
+    "F": "具体数据来源，如：基金委数据库显示在研项目X项",
+    "D": "具体数据来源，如：公开信息未发现异常退学记录"
+  }},
+  "confidence": {{
     "S": "高/中/低",
     "P": "高/中/低",
     "C": "高/中/低",
     "L": "高/中/低",
     "F": "高/中/低",
     "D": "高/中/低"
-  },
+  }},
   "key_findings": [
-    "关键发现1",
+    "关键发现1（基于真实搜索数据）",
     "关键发现2",
     "关键发现3"
   ],
-  "recommendation": "综合建议（200字以内）",
-  "warnings": ["风险提示1（如有）", "风险提示2（如有）"],
+  "recommendation": "综合建议（200字以内，具体、有针对性）",
+  "warnings": ["风险提示1（如有，否则空数组）"],
   "disclaimer": "数据说明：本评估基于公开网络资料，部分数据为估算值，仅供参考，建议结合面试和学长学姐反馈综合判断。"
-}
-"""
+}}"""
 
 
-def evaluate_mentor_with_deepseek(mentor_name: str, institution: str) -> dict:
-    """调用 DeepSeek API 对导师进行 PQI 3.0 评估"""
-    user_prompt = f"""请对以下导师进行 PQI 3.0 评估：
+def evaluate_mentor_with_gemini(mentor_name: str, institution: str) -> dict:
+    """使用 Gemini 2.5 Flash + Google Search 对导师进行 PQI 3.0 评估"""
+    from google import genai
+    from google.genai import types
 
-导师姓名：{mentor_name}
-所在学校/机构：{institution}
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY 未配置")
 
-请搜索该导师的所有公开资料，包括但不限于：
-- Google Scholar 主页（论文、引用、h-index）
-- 学校/院系官网个人主页
-- 实验室官网（学生列表、Alumni 去向）
-- 基金委/科研经费公开信息
-- 学术数据库（Web of Science 等）
+    client = genai.Client(api_key=api_key)
 
-然后严格按照 PQI 3.0 模型计算各项分数，并以指定 JSON 格式输出结果。"""
-
-    logger.info(f"开始评估导师: {mentor_name} @ {institution}")
-
-    response = get_deepseek_client().chat.completions.create(
-        model="deepseek-chat",
-        messages=[
-            {"role": "system", "content": PQI_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.3,
-        max_tokens=4000,
-        response_format={"type": "json_object"}
+    prompt = PQI_PROMPT_TEMPLATE.format(
+        mentor_name=mentor_name,
+        institution=institution
     )
 
-    raw_content = response.choices[0].message.content
-    logger.info(f"DeepSeek 返回原始内容长度: {len(raw_content)}")
+    logger.info(f"开始 Gemini 评估: {mentor_name} @ {institution}")
 
-    result = json.loads(raw_content)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.1,
+        )
+    )
+
+    raw_content = response.text
+    logger.info(f"Gemini 返回内容长度: {len(raw_content)}")
+
+    # 提取 JSON（Gemini 有时会在 JSON 前后加说明文字）
+    import re
+    json_match = re.search(r'\{[\s\S]*\}', raw_content)
+    if not json_match:
+        raise ValueError(f"Gemini 返回内容中未找到 JSON: {raw_content[:200]}")
+
+    json_str = json_match.group(0)
+    result = json.loads(json_str)
+
+    # 确保 PQI 计算正确（防止 AI 算错）
+    scores = result.get("scores", {})
+    S = float(scores.get("S", 0))
+    P = float(scores.get("P", 0))
+    C = float(scores.get("C", 0))
+    L = float(scores.get("L", 0))
+    F = float(scores.get("F", 0))
+    D = float(scores.get("D", 0))
+
+    # 强制重新计算（确保公式正确）
+    PQI = 0.35 * S + 0.20 * P + 0.20 * C + 0.15 * L + 0.10 * F
+    PQI_final = max(0.0, PQI - 0.5 * D)
+
+    result["scores"]["PQI"] = round(PQI, 3)
+    result["scores"]["PQI_final"] = round(PQI_final, 3)
+
+    # 强制重新计算评级
+    if PQI_final >= 0.85:
+        result["rating"] = "顶级实验室"
+    elif PQI_final >= 0.70:
+        result["rating"] = "优秀实验室"
+    elif PQI_final >= 0.55:
+        result["rating"] = "稳定实验室"
+    elif PQI_final >= 0.40:
+        result["rating"] = "风险实验室"
+    else:
+        result["rating"] = "高危实验室"
+
+    logger.info(f"评估完成: PQI_final={PQI_final:.3f}, 评级={result['rating']}")
     return result
 
 
@@ -185,88 +211,89 @@ def format_notion_report(eval_result: dict) -> str:
     rating = eval_result.get("rating", "未知")
 
     report_lines = [
-        f"## PQI 3.0 评估报告",
-        f"**导师：** {eval_result.get('mentor_name', '')}  |  **机构：** {eval_result.get('institution', '')}",
+        f"PQI 3.0 评估报告",
+        f"导师：{eval_result.get('mentor_name', '')}  |  机构：{eval_result.get('institution', '')}",
+        f"最终评分：{pqi_final:.3f}  →  {rating}",
         "",
-        f"### 最终评分：{pqi_final:.3f}  →  {rating}",
-        "",
-        "### 各维度得分",
-        f"| 维度 | 得分 | 置信度 | 数据来源 |",
-        f"|------|------|--------|----------|",
-        f"| S 学生论文质量 (35%) | {scores.get('S', 0):.2f} | {confidence.get('S', '-')} | {data_sources.get('S', '-')} |",
-        f"| P 导师科研能力 (20%) | {scores.get('P', 0):.2f} | {confidence.get('P', '-')} | {data_sources.get('P', '-')} |",
-        f"| C 学生去向 (20%) | {scores.get('C', 0):.2f} | {confidence.get('C', '-')} | {data_sources.get('C', '-')} |",
-        f"| L 实验室稳定度 (15%) | {scores.get('L', 0):.2f} | {confidence.get('L', '-')} | {data_sources.get('L', '-')} |",
-        f"| F 经费指数 (10%) | {scores.get('F', 0):.2f} | {confidence.get('F', '-')} | {data_sources.get('F', '-')} |",
-        f"| D 淘汰率惩罚 | {scores.get('D', 0):.2f} | {confidence.get('D', '-')} | {data_sources.get('D', '-')} |",
-        f"| **PQI (原始)** | **{scores.get('PQI', 0):.3f}** | - | - |",
-        f"| **PQI_final** | **{pqi_final:.3f}** | - | - |",
+        "各维度得分",
+        f"S 学生论文质量 (35%): {scores.get('S', 0):.2f} [{confidence.get('S', '-')}] - {data_sources.get('S', '-')}",
+        f"P 导师科研能力 (20%): {scores.get('P', 0):.2f} [{confidence.get('P', '-')}] - {data_sources.get('P', '-')}",
+        f"C 学生去向 (20%): {scores.get('C', 0):.2f} [{confidence.get('C', '-')}] - {data_sources.get('C', '-')}",
+        f"L 实验室稳定度 (15%): {scores.get('L', 0):.2f} [{confidence.get('L', '-')}] - {data_sources.get('L', '-')}",
+        f"F 经费指数 (10%): {scores.get('F', 0):.2f} [{confidence.get('F', '-')}] - {data_sources.get('F', '-')}",
+        f"D 淘汰率惩罚: {scores.get('D', 0):.2f} [{confidence.get('D', '-')}] - {data_sources.get('D', '-')}",
+        f"PQI (原始): {scores.get('PQI', 0):.3f}",
+        f"PQI_final: {pqi_final:.3f}",
         "",
     ]
 
     if key_findings:
-        report_lines.append("### 关键发现")
+        report_lines.append("关键发现")
         for finding in key_findings:
-            report_lines.append(f"- {finding}")
+            report_lines.append(f"• {finding}")
         report_lines.append("")
 
     if warnings:
-        report_lines.append("### ⚠️ 风险提示")
+        report_lines.append("风险提示")
         for warning in warnings:
-            report_lines.append(f"- {warning}")
+            report_lines.append(f"⚠ {warning}")
         report_lines.append("")
 
     recommendation = eval_result.get("recommendation", "")
     if recommendation:
-        report_lines.append("### 综合建议")
+        report_lines.append("综合建议")
         report_lines.append(recommendation)
         report_lines.append("")
 
     disclaimer = eval_result.get("disclaimer", "")
     if disclaimer:
-        report_lines.append("---")
-        report_lines.append(f"*{disclaimer}*")
+        report_lines.append(disclaimer)
 
     return "\n".join(report_lines)
 
 
-def update_notion_page(page_id: str, eval_result: dict):
-    """将评估结果更新到 Notion 数据库页面"""
-    scores = eval_result.get("scores", {})
+def save_to_notion_db(mentor_name: str, institution: str, result: dict):
+    """将评估结果写入 Notion 数据库"""
+    scores = result.get("scores", {})
     pqi_final = scores.get("PQI_final", 0)
-    rating = eval_result.get("rating", "未知")
-    recommendation = eval_result.get("recommendation", "")
-    report_text = format_notion_report(eval_result)
+    rating = result.get("rating", "未知")
+    recommendation = result.get("recommendation", "")
 
-    # 截断过长文本（Notion rich_text 限制 2000 字符）
     def truncate(text, max_len=1900):
         return text[:max_len] + "…" if len(text) > max_len else text
 
-    properties = {
-        "PQI分数": {
-            "number": round(pqi_final, 3)
-        },
-        "评级": {
-            "select": {"name": rating}
-        },
-        "综合建议": {
-            "rich_text": [{"text": {"content": truncate(recommendation)}}]
-        },
-        "评估状态": {
-            "select": {"name": "已完成"}
-        },
-        "S分": {"number": round(scores.get("S", 0), 3)},
-        "P分": {"number": round(scores.get("P", 0), 3)},
-        "C分": {"number": round(scores.get("C", 0), 3)},
-        "L分": {"number": round(scores.get("L", 0), 3)},
-        "F分": {"number": round(scores.get("F", 0), 3)},
-        "D惩罚": {"number": round(scores.get("D", 0), 3)},
-    }
+    new_page = get_notion_client().pages.create(
+        parent={"database_id": NOTION_DB_ID},
+        properties={
+            "导师姓名": {
+                "title": [{"text": {"content": mentor_name}}]
+            },
+            "学校/机构": {
+                "rich_text": [{"text": {"content": institution}}]
+            },
+            "PQI总分": {"number": round(pqi_final, 3)},
+            "S_学术产出": {"number": round(scores.get("S", 0), 3)},
+            "P_研究生产力": {"number": round(scores.get("P", 0), 3)},
+            "C_资源与支持": {"number": round(scores.get("C", 0), 3)},
+            "L_实验室文化": {"number": round(scores.get("L", 0), 3)},
+            "F_资金与稳定性": {"number": round(scores.get("F", 0), 3)},
+            "D_毕业生去向": {"number": round(scores.get("D", 0), 3)},
+            "评估状态": {"select": {"name": "已完成"}},
+            "评级": {"select": {"name": rating}},
+            "评估时间": {"date": {"start": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+            "数据来源": {
+                "rich_text": [{"text": {"content": truncate("公开网络资料（Google Scholar、学校官网、Web of Science、基金委数据库等）")}}]
+            },
+            "评估报告": {
+                "rich_text": [{"text": {"content": truncate(recommendation)}}]
+            },
+        }
+    )
+    page_id = new_page["id"]
+    notion_page_url = new_page.get("url", "")
 
-    get_notion_client().pages.update(page_id=page_id, properties=properties)
-    logger.info(f"已更新 Notion 页面属性: {page_id}")
-
-    # 将详细报告追加为页面内容
+    # 追加详细报告
+    report_text = format_notion_report(result)
     get_notion_client().blocks.children.append(
         block_id=page_id,
         children=[
@@ -274,7 +301,7 @@ def update_notion_page(page_id: str, eval_result: dict):
                 "object": "block",
                 "type": "heading_2",
                 "heading_2": {
-                    "rich_text": [{"type": "text", "text": {"content": "PQI 3.0 详细评估报告"}}]
+                    "rich_text": [{"type": "text", "text": {"content": "PQI 3.0 详细评估报告（Gemini + Google Search）"}}]
                 }
             },
             {
@@ -286,41 +313,7 @@ def update_notion_page(page_id: str, eval_result: dict):
             }
         ]
     )
-    logger.info(f"已追加详细报告到 Notion 页面: {page_id}")
-
-
-def process_evaluation(page_id: str, mentor_name: str, institution: str):
-    """后台线程：执行评估并写回 Notion"""
-    try:
-        # 先将状态更新为"评估中"
-        get_notion_client().pages.update(
-            page_id=page_id,
-            properties={
-                "评估状态": {"select": {"name": "评估中"}}
-            }
-        )
-
-        # 调用 DeepSeek 评估
-        eval_result = evaluate_mentor_with_deepseek(mentor_name, institution)
-
-        # 写回 Notion
-        update_notion_page(page_id, eval_result)
-        logger.info(f"评估完成: {mentor_name} @ {institution}, PQI_final={eval_result['scores']['PQI_final']:.3f}")
-
-    except Exception as e:
-        logger.error(f"评估失败: {mentor_name} @ {institution}, 错误: {e}", exc_info=True)
-        try:
-            get_notion_client().pages.update(
-                page_id=page_id,
-                properties={
-                    "评估状态": {"select": {"name": "评估失败"}},
-                    "综合建议": {
-                        "rich_text": [{"text": {"content": f"评估过程中发生错误：{str(e)[:200]}"}}]
-                    }
-                }
-            )
-        except Exception as e2:
-            logger.error(f"更新错误状态失败: {e2}")
+    return page_id, notion_page_url
 
 
 # ═══════════════════════════════════════════════════════════
@@ -338,127 +331,14 @@ def health_check():
     return jsonify({
         "status": "ok",
         "service": "PQI 3.0 导师评估服务",
-        "version": "2.0.0"
+        "version": "3.0.0",
+        "ai_engine": "Gemini 2.5 Flash + Google Search"
     })
-
-
-@app.route("/webhook", methods=["POST"])
-def notion_webhook():
-    """接收来自 Notion Button 的 Webhook 请求"""
-    try:
-        data = request.get_json(force=True)
-        logger.info(f"收到 Webhook 请求: {json.dumps(data, ensure_ascii=False)[:500]}")
-
-        # ── 从 Notion Webhook payload 中提取数据 ──────────────
-        # Notion Button Webhook 发送的是数据库页面属性
-        page_id = None
-        mentor_name = None
-        institution = None
-
-        # 尝试从不同的 payload 结构中提取
-        if "data" in data:
-            # Notion Database Automation Webhook 格式
-            page_data = data.get("data", {})
-            page_id = page_data.get("id") or data.get("page_id")
-            props = page_data.get("properties", {})
-        elif "properties" in data:
-            # 直接包含 properties
-            page_id = data.get("id") or data.get("page_id")
-            props = data.get("properties", {})
-        else:
-            # 简化格式（直接传递字段）
-            page_id = data.get("page_id") or data.get("id")
-            props = data
-
-        # 提取导师姓名
-        if "导师姓名" in props:
-            title_prop = props["导师姓名"]
-            if isinstance(title_prop, dict):
-                title_arr = title_prop.get("title", [])
-                if title_arr:
-                    mentor_name = title_arr[0].get("plain_text", "")
-            elif isinstance(title_prop, str):
-                mentor_name = title_prop
-
-        # 提取学校
-        if "学校" in props:
-            school_prop = props["学校"]
-            if isinstance(school_prop, dict):
-                rich_text = school_prop.get("rich_text", [])
-                if rich_text:
-                    institution = rich_text[0].get("plain_text", "")
-                else:
-                    # 可能是 select 类型
-                    select_val = school_prop.get("select", {})
-                    if select_val:
-                        institution = select_val.get("name", "")
-            elif isinstance(school_prop, str):
-                institution = school_prop
-
-        # 兜底：直接从顶层取
-        if not mentor_name:
-            mentor_name = data.get("mentor_name") or data.get("导师姓名")
-        if not institution:
-            institution = data.get("institution") or data.get("学校")
-        if not page_id:
-            page_id = data.get("page_id")
-
-        logger.info(f"解析结果 - page_id: {page_id}, 导师: {mentor_name}, 学校: {institution}")
-
-        if not mentor_name or not institution:
-            return jsonify({
-                "status": "error",
-                "message": "缺少必要参数：导师姓名 或 学校"
-            }), 400
-
-        if not page_id:
-            return jsonify({
-                "status": "error",
-                "message": "缺少 page_id，无法写回 Notion"
-            }), 400
-
-        # ── 在后台线程中执行评估（避免 Webhook 超时）─────────
-        thread = threading.Thread(
-            target=process_evaluation,
-            args=(page_id, mentor_name, institution),
-            daemon=True
-        )
-        thread.start()
-
-        return jsonify({
-            "status": "accepted",
-            "message": f"已开始评估 {mentor_name} @ {institution}，结果将在 1-2 分钟内写回 Notion。"
-        }), 202
-
-    except Exception as e:
-        logger.error(f"Webhook 处理失败: {e}", exc_info=True)
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
-
-@app.route("/evaluate", methods=["POST"])
-def evaluate_direct():
-    """直接调用评估接口（用于测试，不需要 Notion page_id）"""
-    data = request.get_json(force=True)
-    mentor_name = data.get("mentor_name")
-    institution = data.get("institution")
-
-    if not mentor_name or not institution:
-        return jsonify({"status": "error", "message": "缺少 mentor_name 或 institution"}), 400
-
-    try:
-        result = evaluate_mentor_with_deepseek(mentor_name, institution)
-        return jsonify({"status": "ok", "result": result})
-    except Exception as e:
-        logger.error(f"直接评估失败: {e}", exc_info=True)
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/evaluate_web", methods=["POST"])
 def evaluate_web():
-    """网页前端调用的评估接口：评估完成后可选写入 Notion"""
+    """网页前端调用的评估接口"""
     data = request.get_json(force=True)
     mentor_name = data.get("mentor_name", "").strip()
     institution  = data.get("institution", "").strip()
@@ -468,76 +348,14 @@ def evaluate_web():
         return jsonify({"status": "error", "message": "请填写导师姓名和学校/机构"}), 400
 
     try:
-        # 调用 DeepSeek 评估
-        result = evaluate_mentor_with_deepseek(mentor_name, institution)
+        result = evaluate_mentor_with_gemini(mentor_name, institution)
 
         notion_saved = False
         notion_page_url = None
 
-        # 可选：写入 Notion 数据库
         if save_to_notion and NOTION_TOKEN and NOTION_DB_ID and NOTION_DB_ID != "placeholder_will_update":
             try:
-                scores = result.get("scores", {})
-                pqi_final = scores.get("PQI_final", 0)
-                rating = result.get("rating", "未知")
-                recommendation = result.get("recommendation", "")
-
-                def truncate(text, max_len=1900):
-                    return text[:max_len] + "…" if len(text) > max_len else text
-
-                # 创建新页面（数据库中新增一行）
-                import datetime
-                new_page = get_notion_client().pages.create(
-                    parent={"database_id": NOTION_DB_ID},
-                    properties={
-                        "导师姓名": {
-                            "title": [{"text": {"content": mentor_name}}]
-                        },
-                        "学校/机构": {
-                            "rich_text": [{"text": {"content": institution}}]
-                        },
-                        "PQI总分": {"number": round(pqi_final, 3)},
-                        "S_学术产出": {"number": round(scores.get("S", 0), 3)},
-                        "P_研究生产力": {"number": round(scores.get("P", 0), 3)},
-                        "C_资源与支持": {"number": round(scores.get("C", 0), 3)},
-                        "L_实验室文化": {"number": round(scores.get("L", 0), 3)},
-                        "F_资金与稳定性": {"number": round(scores.get("F", 0), 3)},
-                        "D_毕业生去向": {"number": round(scores.get("D", 0), 3)},
-                        "评估状态": {"select": {"name": "已完成"}},
-                        "评级": {"select": {"name": rating}},
-                        "评估时间": {"date": {"start": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
-                        "数据来源": {
-                            "rich_text": [{"text": {"content": truncate("公开网络资料（Google Scholar、学校官网、Web of Science 等）")}}]
-                        },
-                        "评估报告": {
-                            "rich_text": [{"text": {"content": truncate(recommendation)}}]
-                        },
-                    }
-                )
-                page_id = new_page["id"]
-                notion_page_url = new_page.get("url", "")
-
-                # 追加详细报告到页面内容
-                report_text = format_notion_report(result)
-                get_notion_client().blocks.children.append(
-                    block_id=page_id,
-                    children=[
-                        {
-                            "object": "block",
-                            "type": "heading_2",
-                            "heading_2": {
-                                "rich_text": [{"type": "text", "text": {"content": "PQI 3.0 详细评估报告"}}]
-                            }
-                        },
-                        {
-                            "object": "block",
-                            "type": "paragraph",
-                            "paragraph": {
-                                "rich_text": [{"type": "text", "text": {"content": truncate(report_text, 1900)}}]
-                            }
-                        }
-                    ]
-                )
+                _, notion_page_url = save_to_notion_db(mentor_name, institution, result)
                 notion_saved = True
                 logger.info(f"已保存到 Notion: {mentor_name} @ {institution}")
             except Exception as ne:
@@ -552,6 +370,24 @@ def evaluate_web():
 
     except Exception as e:
         logger.error(f"网页评估失败: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/evaluate", methods=["POST"])
+def evaluate_direct():
+    """直接调用评估接口（兼容旧版 Webhook）"""
+    data = request.get_json(force=True)
+    mentor_name = data.get("mentor_name")
+    institution = data.get("institution")
+
+    if not mentor_name or not institution:
+        return jsonify({"status": "error", "message": "缺少 mentor_name 或 institution"}), 400
+
+    try:
+        result = evaluate_mentor_with_gemini(mentor_name, institution)
+        return jsonify({"status": "ok", "result": result})
+    except Exception as e:
+        logger.error(f"直接评估失败: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
