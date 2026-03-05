@@ -486,6 +486,7 @@ def evaluate_web():
                     return text[:max_len] + "…" if len(text) > max_len else text
 
                 # 创建新页面（数据库中新增一行）
+                import datetime
                 new_page = get_notion_client().pages.create(
                     parent={"database_id": NOTION_DB_ID},
                     properties={
@@ -504,7 +505,11 @@ def evaluate_web():
                         "D_毕业生去向": {"number": round(scores.get("D", 0), 3)},
                         "评估状态": {"select": {"name": "已完成"}},
                         "评级": {"select": {"name": rating}},
-                        "综合建议": {
+                        "评估时间": {"date": {"start": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}},
+                        "数据来源": {
+                            "rich_text": [{"text": {"content": truncate("公开网络资料（Google Scholar、学校官网、Web of Science 等）")}}]
+                        },
+                        "评估报告": {
                             "rich_text": [{"text": {"content": truncate(recommendation)}}]
                         },
                     }
