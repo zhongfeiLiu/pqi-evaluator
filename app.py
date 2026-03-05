@@ -9,7 +9,7 @@ import os
 import json
 import logging
 import threading
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from notion_client import Client
 from openai import OpenAI
 
@@ -328,11 +328,17 @@ def process_evaluation(page_id: str, mentor_name: str, institution: str):
 # ═══════════════════════════════════════════════════════════
 
 @app.route("/", methods=["GET"])
+def index():
+    """返回前端评估页面"""
+    return render_template("index.html")
+
+
+@app.route("/health", methods=["GET"])
 def health_check():
     return jsonify({
         "status": "ok",
         "service": "PQI 3.0 导师评估服务",
-        "version": "1.0.0"
+        "version": "2.0.0"
     })
 
 
@@ -447,6 +453,100 @@ def evaluate_direct():
         return jsonify({"status": "ok", "result": result})
     except Exception as e:
         logger.error(f"直接评估失败: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/evaluate_web", methods=["POST"])
+def evaluate_web():
+    """网页前端调用的评估接口：评估完成后可选写入 Notion"""
+    data = request.get_json(force=True)
+    mentor_name = data.get("mentor_name", "").strip()
+    institution  = data.get("institution", "").strip()
+    save_to_notion = data.get("save_to_notion", True)
+
+    if not mentor_name or not institution:
+        return jsonify({"status": "error", "message": "请填写导师姓名和学校/机构"}), 400
+
+    try:
+        # 调用 DeepSeek 评估
+        result = evaluate_mentor_with_deepseek(mentor_name, institution)
+
+        notion_saved = False
+        notion_page_url = None
+
+        # 可选：写入 Notion 数据库
+        if save_to_notion and NOTION_TOKEN and NOTION_DB_ID and NOTION_DB_ID != "placeholder_will_update":
+            try:
+                scores = result.get("scores", {})
+                pqi_final = scores.get("PQI_final", 0)
+                rating = result.get("rating", "未知")
+                recommendation = result.get("recommendation", "")
+
+                def truncate(text, max_len=1900):
+                    return text[:max_len] + "…" if len(text) > max_len else text
+
+                # 创建新页面（数据库中新增一行）
+                new_page = get_notion_client().pages.create(
+                    parent={"database_id": NOTION_DB_ID},
+                    properties={
+                        "导师姓名": {
+                            "title": [{"text": {"content": mentor_name}}]
+                        },
+                        "学校/机构": {
+                            "rich_text": [{"text": {"content": institution}}]
+                        },
+                        "PQI总分": {"number": round(pqi_final, 3)},
+                        "S_学术产出": {"number": round(scores.get("S", 0), 3)},
+                        "P_研究生产力": {"number": round(scores.get("P", 0), 3)},
+                        "C_资源与支持": {"number": round(scores.get("C", 0), 3)},
+                        "L_实验室文化": {"number": round(scores.get("L", 0), 3)},
+                        "F_资金与稳定性": {"number": round(scores.get("F", 0), 3)},
+                        "D_毕业生去向": {"number": round(scores.get("D", 0), 3)},
+                        "评估状态": {"select": {"name": "已完成"}},
+                        "评级": {"select": {"name": rating}},
+                        "综合建议": {
+                            "rich_text": [{"text": {"content": truncate(recommendation)}}]
+                        },
+                    }
+                )
+                page_id = new_page["id"]
+                notion_page_url = new_page.get("url", "")
+
+                # 追加详细报告到页面内容
+                report_text = format_notion_report(result)
+                get_notion_client().blocks.children.append(
+                    block_id=page_id,
+                    children=[
+                        {
+                            "object": "block",
+                            "type": "heading_2",
+                            "heading_2": {
+                                "rich_text": [{"type": "text", "text": {"content": "PQI 3.0 详细评估报告"}}]
+                            }
+                        },
+                        {
+                            "object": "block",
+                            "type": "paragraph",
+                            "paragraph": {
+                                "rich_text": [{"type": "text", "text": {"content": truncate(report_text, 1900)}}]
+                            }
+                        }
+                    ]
+                )
+                notion_saved = True
+                logger.info(f"已保存到 Notion: {mentor_name} @ {institution}")
+            except Exception as ne:
+                logger.warning(f"保存到 Notion 失败（不影响评估结果）: {ne}")
+
+        return jsonify({
+            "status": "ok",
+            "result": result,
+            "notion_saved": notion_saved,
+            "notion_page_url": notion_page_url
+        })
+
+    except Exception as e:
+        logger.error(f"网页评估失败: {e}", exc_info=True)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 

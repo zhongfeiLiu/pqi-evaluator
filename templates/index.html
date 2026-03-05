@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PQI 3.0 导师评估系统</title>
+  <style>
+    :root {
+      --primary: #2563eb;
+      --primary-dark: #1d4ed8;
+      --success: #16a34a;
+      --warning: #d97706;
+      --danger: #dc2626;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --muted: #64748b;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%);
+      color: white;
+      padding: 2rem 1.5rem;
+      text-align: center;
+    }
+    header h1 { font-size: 2rem; font-weight: 700; letter-spacing: -0.5px; }
+    header p  { margin-top: 0.5rem; opacity: 0.85; font-size: 1rem; }
+
+    /* ── Layout ── */
+    .container { max-width: 860px; margin: 0 auto; padding: 2rem 1.5rem; }
+
+    /* ── Card ── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.75rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    }
+    .card h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 1.25rem; color: var(--text); }
+
+    /* ── Form ── */
+    .form-row { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .form-group { flex: 1; min-width: 220px; }
+    .form-group label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.4rem; color: var(--muted); }
+    .form-group input {
+      width: 100%; padding: 0.65rem 0.9rem;
+      border: 1.5px solid var(--border); border-radius: 8px;
+      font-size: 1rem; transition: border-color .2s;
+      outline: none;
+    }
+    .form-group input:focus { border-color: var(--primary); }
+
+    .btn {
+      display: inline-flex; align-items: center; gap: 0.5rem;
+      padding: 0.7rem 1.75rem; border: none; border-radius: 8px;
+      font-size: 1rem; font-weight: 600; cursor: pointer;
+      transition: background .2s, transform .1s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-primary:disabled { background: #93c5fd; cursor: not-allowed; }
+
+    .form-actions { margin-top: 1.25rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .save-notion-wrap { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; color: var(--muted); }
+    .save-notion-wrap input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; }
+
+    /* ── Progress ── */
+    #progress-section { display: none; }
+    .progress-bar-outer {
+      background: #e2e8f0; border-radius: 99px; height: 8px; overflow: hidden; margin-top: 0.75rem;
+    }
+    .progress-bar-inner {
+      height: 100%; background: var(--primary); border-radius: 99px;
+      width: 0%; transition: width 0.4s ease;
+      animation: pulse-bar 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse-bar {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    .progress-status { font-size: 0.9rem; color: var(--muted); margin-top: 0.5rem; }
+
+    /* ── Result ── */
+    #result-section { display: none; }
+
+    .score-hero {
+      text-align: center; padding: 1.5rem 1rem;
+      background: linear-gradient(135deg, #eff6ff, #dbeafe);
+      border-radius: 10px; margin-bottom: 1.5rem;
+    }
+    .score-hero .pqi-value { font-size: 3.5rem; font-weight: 800; color: var(--primary); line-height: 1; }
+    .score-hero .rating-badge {
+      display: inline-block; margin-top: 0.6rem;
+      padding: 0.3rem 1rem; border-radius: 99px;
+      font-size: 1rem; font-weight: 600;
+    }
+    .rating-top    { background: #dcfce7; color: #15803d; }
+    .rating-great  { background: #dbeafe; color: #1d4ed8; }
+    .rating-stable { background: #fef9c3; color: #a16207; }
+    .rating-risk   { background: #ffedd5; color: #c2410c; }
+    .rating-danger { background: #fee2e2; color: #b91c1c; }
+
+    /* ── Dimension bars ── */
+    .dim-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; }
+    .dim-item { }
+    .dim-header { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.3rem; }
+    .dim-label { font-weight: 500; }
+    .dim-score { font-weight: 700; color: var(--primary); }
+    .dim-bar-outer { background: #e2e8f0; border-radius: 99px; height: 6px; }
+    .dim-bar-inner { height: 100%; border-radius: 99px; background: var(--primary); }
+    .dim-confidence { font-size: 0.75rem; color: var(--muted); margin-top: 0.2rem; }
+
+    /* ── Findings / Warnings / Recommendation ── */
+    .finding-list, .warning-list { list-style: none; padding: 0; }
+    .finding-list li { padding: 0.4rem 0; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+    .finding-list li:last-child { border-bottom: none; }
+    .finding-list li::before { content: "✦ "; color: var(--primary); }
+    .warning-list li { padding: 0.4rem 0; font-size: 0.9rem; color: #b45309; }
+    .warning-list li::before { content: "⚠ "; }
+
+    .recommendation-text {
+      background: #f0fdf4; border-left: 4px solid var(--success);
+      padding: 1rem 1.25rem; border-radius: 0 8px 8px 0;
+      font-size: 0.9rem; line-height: 1.7; color: #166534;
+    }
+
+    .disclaimer {
+      font-size: 0.78rem; color: var(--muted); margin-top: 1rem;
+      padding: 0.75rem; background: #f8fafc; border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+
+    .notion-saved {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      font-size: 0.85rem; color: var(--success); font-weight: 500;
+    }
+
+    /* ── Error ── */
+    #error-section {
+      display: none; background: #fff1f2; border: 1px solid #fecdd3;
+      border-radius: 10px; padding: 1.25rem; color: #be123c;
+    }
+
+    /* ── History ── */
+    #history-section { display: none; }
+    .history-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0.6rem 0; border-bottom: 1px solid var(--border); font-size: 0.9rem;
+    }
+    .history-item:last-child { border-bottom: none; }
+    .history-name { font-weight: 500; }
+    .history-score { font-weight: 700; color: var(--primary); }
+    .history-rating { font-size: 0.8rem; color: var(--muted); }
+
+    /* ── Responsive ── */
+    @media (max-width: 600px) {
+      header h1 { font-size: 1.5rem; }
+      .score-hero .pqi-value { font-size: 2.5rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🎓 PQI 3.0 导师评估系统</h1>
+  <p>基于公开资料，用 AI 量化评估研究生导师质量</p>
+</header>
+
+<div class="container">
+
+  <!-- 输入表单 -->
+  <div class="card">
+    <h2>输入导师信息</h2>
+    <div class="form-row">
+      <div class="form-group">
+        <label for="mentor-name">导师姓名</label>
+        <input type="text" id="mentor-name" placeholder="例：张三" autocomplete="off" />
+      </div>
+      <div class="form-group">
+        <label for="institution">学校 / 机构</label>
+        <input type="text" id="institution" placeholder="例：清华大学" autocomplete="off" />
+      </div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-primary" id="evaluate-btn" onclick="startEvaluation()">
+        <span id="btn-icon">🔍</span>
+        <span id="btn-text">开始评估</span>
+      </button>
+      <div class="save-notion-wrap">
+        <input type="checkbox" id="save-notion" checked />
+        <label for="save-notion">同步保存到 Notion 数据库</label>
+      </div>
+    </div>
+  </div>
+
+  <!-- 进度条 -->
+  <div class="card" id="progress-section">
+    <h2>正在评估中…</h2>
+    <div class="progress-bar-outer">
+      <div class="progress-bar-inner" id="progress-bar"></div>
+    </div>
+    <p class="progress-status" id="progress-status">正在搜索公开资料…</p>
+  </div>
+
+  <!-- 错误提示 -->
+  <div id="error-section">
+    <strong>评估失败：</strong><span id="error-msg"></span>
+  </div>
+
+  <!-- 结果展示 -->
+  <div id="result-section">
+
+    <!-- 总分 Hero -->
+    <div class="card">
+      <div class="score-hero">
+        <div class="pqi-value" id="res-pqi">—</div>
+        <div><span class="rating-badge" id="res-rating-badge">—</span></div>
+        <div style="margin-top:0.5rem;font-size:0.9rem;color:#475569;">
+          <span id="res-name"></span> &nbsp;·&nbsp; <span id="res-inst"></span>
+        </div>
+      </div>
+
+      <!-- 各维度 -->
+      <h2>各维度得分</h2>
+      <div class="dim-grid" id="dim-grid"></div>
+    </div>
+
+    <!-- 关键发现 -->
+    <div class="card" id="findings-card" style="display:none">
+      <h2>关键发现</h2>
+      <ul class="finding-list" id="findings-list"></ul>
+    </div>
+
+    <!-- 风险提示 -->
+    <div class="card" id="warnings-card" style="display:none">
+      <h2>⚠️ 风险提示</h2>
+      <ul class="warning-list" id="warnings-list"></ul>
+    </div>
+
+    <!-- 综合建议 -->
+    <div class="card">
+      <h2>综合建议</h2>
+      <div class="recommendation-text" id="res-recommendation"></div>
+      <div class="disclaimer" id="res-disclaimer"></div>
+      <div style="margin-top:0.75rem;" id="notion-saved-msg"></div>
+    </div>
+
+  </div>
+
+  <!-- 历史记录 -->
+  <div class="card" id="history-section">
+    <h2>本次会话评估记录</h2>
+    <div id="history-list"></div>
+  </div>
+
+</div><!-- /container -->
+
+<script>
+const STEPS = [
+  "正在搜索 Google Scholar 学术主页…",
+  "正在分析导师论文发表情况…",
+  "正在查询学生毕业去向…",
+  "正在评估实验室经费与稳定性…",
+  "正在计算 PQI 3.0 各维度分数…",
+  "正在生成综合评估报告…",
+];
+
+let progressTimer = null;
+let stepIndex = 0;
+const history = [];
+
+function startEvaluation() {
+  const mentorName = document.getElementById("mentor-name").value.trim();
+  const institution = document.getElementById("institution").value.trim();
+  const saveNotion = document.getElementById("save-notion").checked;
+
+  if (!mentorName || !institution) {
+    alert("请填写导师姓名和学校/机构！");
+    return;
+  }
+
+  // 重置 UI
+  document.getElementById("result-section").style.display = "none";
+  document.getElementById("error-section").style.display = "none";
+  document.getElementById("progress-section").style.display = "block";
+  document.getElementById("evaluate-btn").disabled = true;
+  document.getElementById("btn-text").textContent = "评估中…";
+  document.getElementById("btn-icon").textContent = "⏳";
+
+  // 进度动画
+  let pct = 5;
+  stepIndex = 0;
+  document.getElementById("progress-bar").style.width = pct + "%";
+  document.getElementById("progress-status").textContent = STEPS[0];
+
+  progressTimer = setInterval(() => {
+    pct = Math.min(pct + Math.random() * 8, 90);
+    document.getElementById("progress-bar").style.width = pct + "%";
+    stepIndex = Math.min(stepIndex + 1, STEPS.length - 1);
+    document.getElementById("progress-status").textContent = STEPS[stepIndex];
+  }, 4000);
+
+  // 调用后端
+  fetch("/evaluate_web", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mentor_name: mentorName, institution: institution, save_to_notion: saveNotion })
+  })
+  .then(r => r.json())
+  .then(data => {
+    clearInterval(progressTimer);
+    document.getElementById("progress-bar").style.width = "100%";
+    document.getElementById("progress-status").textContent = "评估完成！";
+
+    setTimeout(() => {
+      document.getElementById("progress-section").style.display = "none";
+      document.getElementById("evaluate-btn").disabled = false;
+      document.getElementById("btn-text").textContent = "开始评估";
+      document.getElementById("btn-icon").textContent = "🔍";
+
+      if (data.status === "ok") {
+        renderResult(data.result, data.notion_saved);
+        addHistory(mentorName, institution, data.result);
+      } else {
+        showError(data.message || "未知错误");
+      }
+    }, 600);
+  })
+  .catch(err => {
+    clearInterval(progressTimer);
+    document.getElementById("progress-section").style.display = "none";
+    document.getElementById("evaluate-btn").disabled = false;
+    document.getElementById("btn-text").textContent = "开始评估";
+    document.getElementById("btn-icon").textContent = "🔍";
+    showError("网络请求失败：" + err.message);
+  });
+}
+
+function renderResult(r, notionSaved) {
+  const scores = r.scores || {};
+  const pqiFinal = scores.PQI_final || 0;
+  const rating = r.rating || "未知";
+
+  document.getElementById("res-pqi").textContent = pqiFinal.toFixed(3);
+  document.getElementById("res-name").textContent = r.mentor_name || "";
+  document.getElementById("res-inst").textContent = r.institution || "";
+
+  // 评级徽章
+  const badge = document.getElementById("res-rating-badge");
+  badge.textContent = rating;
+  badge.className = "rating-badge " + getRatingClass(pqiFinal);
+
+  // 各维度
+  const dims = [
+    { key: "S", label: "S 学生论文质量", weight: "35%" },
+    { key: "P", label: "P 导师科研能力", weight: "20%" },
+    { key: "C", label: "C 学生去向",     weight: "20%" },
+    { key: "L", label: "L 实验室稳定度", weight: "15%" },
+    { key: "F", label: "F 经费指数",     weight: "10%" },
+    { key: "D", label: "D 淘汰率惩罚",   weight: "—"   },
+  ];
+  const grid = document.getElementById("dim-grid");
+  grid.innerHTML = "";
+  dims.forEach(d => {
+    const val = scores[d.key] || 0;
+    const conf = (r.confidence || {})[d.key] || "—";
+    const pct = Math.min(val * 100, 100);
+    const barColor = d.key === "D" ? "#ef4444" : "#2563eb";
+    grid.innerHTML += `
+      <div class="dim-item">
+        <div class="dim-header">
+          <span class="dim-label">${d.label} <span style="color:#94a3b8;font-size:.75rem">(${d.weight})</span></span>
+          <span class="dim-score">${val.toFixed(2)}</span>
+        </div>
+        <div class="dim-bar-outer">
+          <div class="dim-bar-inner" style="width:${pct}%;background:${barColor}"></div>
+        </div>
+        <div class="dim-confidence">置信度：${conf}</div>
+      </div>`;
+  });
+
+  // 关键发现
+  const findings = r.key_findings || [];
+  if (findings.length > 0) {
+    const ul = document.getElementById("findings-list");
+    ul.innerHTML = findings.map(f => `<li>${f}</li>`).join("");
+    document.getElementById("findings-card").style.display = "block";
+  }
+
+  // 风险提示
+  const warnings = (r.warnings || []).filter(w => w && w.trim());
+  if (warnings.length > 0) {
+    const ul = document.getElementById("warnings-list");
+    ul.innerHTML = warnings.map(w => `<li>${w}</li>`).join("");
+    document.getElementById("warnings-card").style.display = "block";
+  }
+
+  // 建议 & 免责声明
+  document.getElementById("res-recommendation").textContent = r.recommendation || "";
+  document.getElementById("res-disclaimer").textContent = r.disclaimer || "";
+
+  // Notion 保存状态
+  const notionMsg = document.getElementById("notion-saved-msg");
+  if (notionSaved) {
+    notionMsg.innerHTML = '<span class="notion-saved">✅ 已同步保存到 Notion 数据库</span>';
+  } else {
+    notionMsg.innerHTML = "";
+  }
+
+  document.getElementById("result-section").style.display = "block";
+  document.getElementById("result-section").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function getRatingClass(score) {
+  if (score >= 0.85) return "rating-top";
+  if (score >= 0.70) return "rating-great";
+  if (score >= 0.55) return "rating-stable";
+  if (score >= 0.40) return "rating-risk";
+  return "rating-danger";
+}
+
+function showError(msg) {
+  document.getElementById("error-msg").textContent = msg;
+  document.getElementById("error-section").style.display = "block";
+}
+
+function addHistory(name, inst, result) {
+  const scores = result.scores || {};
+  history.unshift({ name, inst, pqi: scores.PQI_final || 0, rating: result.rating || "—" });
+  const section = document.getElementById("history-section");
+  const list = document.getElementById("history-list");
+  list.innerHTML = history.map(h => `
+    <div class="history-item">
+      <div>
+        <span class="history-name">${h.name}</span>
+        <span style="color:#94a3b8;margin-left:.5rem;font-size:.8rem">${h.inst}</span>
+      </div>
+      <div style="text-align:right">
+        <span class="history-score">${h.pqi.toFixed(3)}</span>
+        <div class="history-rating">${h.rating}</div>
+      </div>
+    </div>`).join("");
+  section.style.display = "block";
+}
+
+// 支持按 Enter 触发
+document.addEventListener("DOMContentLoaded", () => {
+  ["mentor-name", "institution"].forEach(id => {
+    document.getElementById(id).addEventListener("keydown", e => {
+      if (e.key === "Enter") startEvaluation();
+    });
+  });
+});
+</script>
+
+</body>
+</html>
