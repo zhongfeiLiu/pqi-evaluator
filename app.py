@@ -28,14 +28,24 @@ NOTION_DB_ID      = os.environ.get("NOTION_DB_ID", "")
 DEEPSEEK_API_KEY  = os.environ.get("DEEPSEEK_API_KEY", "")
 WEBHOOK_SECRET    = os.environ.get("WEBHOOK_SECRET", "")   # 可选安全校验
 
-# ── DeepSeek 客户端（兼容 OpenAI SDK）─────────────────────
-deepseek_client = OpenAI(
-    api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com"
-)
+# ── 客户端延迟初始化（避免启动时因环境变量缺失而崩溃）─────
+_deepseek_client = None
+_notion_client = None
 
-# ── Notion 客户端 ─────────────────────────────────────────
-notion = Client(auth=NOTION_TOKEN)
+def get_deepseek_client():
+    global _deepseek_client
+    if _deepseek_client is None:
+        _deepseek_client = OpenAI(
+            api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+            base_url="https://api.deepseek.com"
+        )
+    return _deepseek_client
+
+def get_notion_client():
+    global _notion_client
+    if _notion_client is None:
+        _notion_client = Client(auth=os.environ.get("NOTION_TOKEN", ""))
+    return _notion_client
 
 # ═══════════════════════════════════════════════════════════
 #  PQI 3.0 评估 Prompt
@@ -145,7 +155,7 @@ def evaluate_mentor_with_deepseek(mentor_name: str, institution: str) -> dict:
 
     logger.info(f"开始评估导师: {mentor_name} @ {institution}")
 
-    response = deepseek_client.chat.completions.create(
+    response = get_deepseek_client().chat.completions.create(
         model="deepseek-chat",
         messages=[
             {"role": "system", "content": PQI_SYSTEM_PROMPT},
@@ -253,11 +263,11 @@ def update_notion_page(page_id: str, eval_result: dict):
         "D惩罚": {"number": round(scores.get("D", 0), 3)},
     }
 
-    notion.pages.update(page_id=page_id, properties=properties)
+    get_notion_client().pages.update(page_id=page_id, properties=properties)
     logger.info(f"已更新 Notion 页面属性: {page_id}")
 
     # 将详细报告追加为页面内容
-    notion.blocks.children.append(
+    get_notion_client().blocks.children.append(
         block_id=page_id,
         children=[
             {
@@ -283,7 +293,7 @@ def process_evaluation(page_id: str, mentor_name: str, institution: str):
     """后台线程：执行评估并写回 Notion"""
     try:
         # 先将状态更新为"评估中"
-        notion.pages.update(
+        get_notion_client().pages.update(
             page_id=page_id,
             properties={
                 "评估状态": {"select": {"name": "评估中"}}
@@ -300,7 +310,7 @@ def process_evaluation(page_id: str, mentor_name: str, institution: str):
     except Exception as e:
         logger.error(f"评估失败: {mentor_name} @ {institution}, 错误: {e}", exc_info=True)
         try:
-            notion.pages.update(
+            get_notion_client().pages.update(
                 page_id=page_id,
                 properties={
                     "评估状态": {"select": {"name": "评估失败"}},
