@@ -343,12 +343,68 @@ def evaluate_web():
     mentor_name = data.get("mentor_name", "").strip()
     institution  = data.get("institution", "").strip()
     save_to_notion = data.get("save_to_notion", True)
+    supplement = data.get("supplement", {})  # 用户补充的私下信息
 
     if not mentor_name or not institution:
         return jsonify({"status": "error", "message": "请填写导师姓名和学校/机构"}), 400
 
     try:
         result = evaluate_mentor_with_gemini(mentor_name, institution)
+
+        # ── 用用户补充的真实数据覆盖 AI 估算值 ──────────────────
+        if supplement:
+            scores = result.get("scores", {})
+            S = float(scores.get("S", 0))
+            P = float(scores.get("P", 0))
+            C = float(scores.get("C", 0))
+            L = float(scores.get("L", 0))
+            F = float(scores.get("F", 0))
+
+            # 如果用户提供了退学/转组/延毕/总人数，重新计算 D
+            dropout  = supplement.get("dropout_count",  None)
+            transfer = supplement.get("transfer_count", None)
+            overdue  = supplement.get("overdue_count",  None)
+            total    = supplement.get("total_students", None)
+
+            if total is not None and total > 0:
+                bad = (dropout or 0) + (transfer or 0) + (overdue or 0)
+                D_new = bad / total
+                scores["D"] = round(D_new, 3)
+                result["confidence"]["D"] = "高（用户实际数据）"
+                result["data_sources"]["D"] = (
+                    f"用户补充：退学{dropout or 0}人 + 转组{transfer or 0}人 "
+                    f"+ 超7年延毕{overdue or 0}人，入组总人数{total}人，"
+                    f"D = {D_new:.3f}"
+                )
+                # 重新计算 PQI_final
+                PQI = 0.35*S + 0.20*P + 0.20*C + 0.15*L + 0.10*F
+                PQI_final = max(0.0, PQI - 0.5 * D_new)
+                scores["PQI"] = round(PQI, 3)
+                scores["PQI_final"] = round(PQI_final, 3)
+
+                # 重新评级
+                if PQI_final >= 0.85:
+                    result["rating"] = "顶级实验室"
+                elif PQI_final >= 0.70:
+                    result["rating"] = "优秀实验室"
+                elif PQI_final >= 0.55:
+                    result["rating"] = "稳定实验室"
+                elif PQI_final >= 0.40:
+                    result["rating"] = "风险实验室"
+                else:
+                    result["rating"] = "高危实验室"
+
+                result["scores"] = scores
+                logger.info(f"用户补充数据覆盖 D 值: D={D_new:.3f}, PQI_final={PQI_final:.3f}")
+
+            # 如果有其他补充说明，追加到 warnings 和 recommendation
+            notes = supplement.get("notes", "").strip()
+            if notes:
+                result.setdefault("warnings", []).append(f"用户补充（私下了解）：{notes}")
+                result["recommendation"] = (
+                    result.get("recommendation", "") +
+                    f"\n\n【用户补充信息】{notes}"
+                ).strip()
 
         notion_saved = False
         notion_page_url = None

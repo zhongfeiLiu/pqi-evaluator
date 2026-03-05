@@ -166,6 +166,51 @@
     .history-score { font-weight: 700; color: var(--primary); }
     .history-rating { font-size: 0.8rem; color: var(--muted); }
 
+    /* ── Supplement Section ── */
+    .supplement-toggle {
+      display: flex; align-items: center; gap: 0.5rem;
+      cursor: pointer; font-size: 0.9rem; color: var(--primary);
+      font-weight: 500; margin-top: 1rem; user-select: none;
+      background: none; border: none; padding: 0;
+    }
+    .supplement-toggle:hover { color: var(--primary-dark); }
+    .supplement-toggle .arrow { transition: transform 0.2s; display: inline-block; }
+    .supplement-toggle.open .arrow { transform: rotate(90deg); }
+
+    .supplement-panel {
+      display: none; margin-top: 1rem;
+      background: #f0f9ff; border: 1px solid #bae6fd;
+      border-radius: 10px; padding: 1.25rem;
+    }
+    .supplement-panel.show { display: block; }
+    .supplement-panel .panel-title {
+      font-size: 0.85rem; font-weight: 600; color: #0369a1;
+      margin-bottom: 0.75rem;
+    }
+    .supplement-panel .panel-note {
+      font-size: 0.78rem; color: #0284c7; margin-bottom: 1rem;
+      line-height: 1.5;
+    }
+    .supplement-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0.75rem;
+    }
+    .supplement-grid .form-group label { color: #0369a1; }
+    .supplement-grid .form-group input {
+      border-color: #bae6fd;
+    }
+    .supplement-grid .form-group input:focus { border-color: #0284c7; }
+    .supplement-extra {
+      margin-top: 0.75rem;
+    }
+    .supplement-extra label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.4rem; color: #0369a1; }
+    .supplement-extra textarea {
+      width: 100%; padding: 0.65rem 0.9rem;
+      border: 1.5px solid #bae6fd; border-radius: 8px;
+      font-size: 0.9rem; resize: vertical; min-height: 80px;
+      font-family: inherit; outline: none;
+    }
+    .supplement-extra textarea:focus { border-color: #0284c7; }
+
     /* ── Responsive ── */
     @media (max-width: 600px) {
       header h1 { font-size: 1.5rem; }
@@ -195,6 +240,38 @@
         <input type="text" id="institution" placeholder="例：清华大学" autocomplete="off" />
       </div>
     </div>
+    <!-- 补充私下信息（折叠面板） -->
+    <button class="supplement-toggle" id="supplement-toggle" onclick="toggleSupplement()" type="button">
+      <span class="arrow">▶</span>
+      <span>补充私下信息（网上搜不到的内容，可选）</span>
+    </button>
+    <div class="supplement-panel" id="supplement-panel">
+      <div class="panel-title">📝 手动补充信息（将覆盖 AI 估算值，使评分更准确）</div>
+      <div class="panel-note">以下信息通常无法从公开网络获取，如您通过学长学姐或其他渠道了解到，请填写。留空则使用 AI 估算值。</div>
+      <div class="supplement-grid">
+        <div class="form-group">
+          <label for="sup-dropout">退学博士生人数</label>
+          <input type="number" id="sup-dropout" min="0" placeholder="例：1" />
+        </div>
+        <div class="form-group">
+          <label for="sup-transfer">转组人数</label>
+          <input type="number" id="sup-transfer" min="0" placeholder="例：0" />
+        </div>
+        <div class="form-group">
+          <label for="sup-overdue">超7年延毕人数</label>
+          <input type="number" id="sup-overdue" min="0" placeholder="例：0" />
+        </div>
+        <div class="form-group">
+          <label for="sup-total">入组学生总人数</label>
+          <input type="number" id="sup-total" min="1" placeholder="例：10" />
+        </div>
+      </div>
+      <div class="supplement-extra">
+        <label for="sup-notes">其他补充说明（可选）</label>
+        <textarea id="sup-notes" placeholder="例：导师脾气暴躁，经常骂学生；实验室氛围差；毕业论文要求极高等..."></textarea>
+      </div>
+    </div>
+
     <div class="form-actions">
       <button class="btn btn-primary" id="evaluate-btn" onclick="startEvaluation()">
         <span id="btn-icon">🔍</span>
@@ -288,6 +365,20 @@ function startEvaluation() {
   const institution = document.getElementById("institution").value.trim();
   const saveNotion = document.getElementById("save-notion").checked;
 
+  // 补充信息
+  const supDropout  = document.getElementById("sup-dropout").value.trim();
+  const supTransfer = document.getElementById("sup-transfer").value.trim();
+  const supOverdue  = document.getElementById("sup-overdue").value.trim();
+  const supTotal    = document.getElementById("sup-total").value.trim();
+  const supNotes    = document.getElementById("sup-notes").value.trim();
+
+  const supplement = {};
+  if (supDropout  !== "") supplement.dropout_count  = parseInt(supDropout);
+  if (supTransfer !== "") supplement.transfer_count = parseInt(supTransfer);
+  if (supOverdue  !== "") supplement.overdue_count  = parseInt(supOverdue);
+  if (supTotal    !== "") supplement.total_students = parseInt(supTotal);
+  if (supNotes    !== "") supplement.notes          = supNotes;
+
   if (!mentorName || !institution) {
     alert("请填写导师姓名和学校/机构！");
     return;
@@ -318,7 +409,7 @@ function startEvaluation() {
   fetch("/evaluate_web", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mentor_name: mentorName, institution: institution, save_to_notion: saveNotion })
+    body: JSON.stringify({ mentor_name: mentorName, institution: institution, save_to_notion: saveNotion, supplement: supplement })
   })
   .then(r => r.json())
   .then(data => {
@@ -455,6 +546,13 @@ function addHistory(name, inst, result) {
       </div>
     </div>`).join("");
   section.style.display = "block";
+}
+
+function toggleSupplement() {
+  const toggle = document.getElementById("supplement-toggle");
+  const panel  = document.getElementById("supplement-panel");
+  toggle.classList.toggle("open");
+  panel.classList.toggle("show");
 }
 
 // 支持按 Enter 触发
